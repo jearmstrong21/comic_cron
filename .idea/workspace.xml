@@ -14,10 +14,6 @@
   <component name="ChangeListManager">
     <list default="true" id="24e7c02a-5615-4477-8c92-837477eff68c" name="Default Changelist" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/comic_cron.json" beforeDir="false" afterPath="$PROJECT_DIR$/comic_cron.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -89,7 +85,7 @@
       <workItem from="1611864034727" duration="19807000" />
       <workItem from="1611991549685" duration="16293000" />
       <workItem from="1612209070121" duration="7351000" />
-      <workItem from="1612255798272" duration="16739000" />
+      <workItem from="1612255798272" duration="18866000" />
     </task>
     <servers />
   </component>

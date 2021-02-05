@@ -134,8 +134,10 @@ impl RssItem {
 }
 
 impl Webhook {
-    async fn send(self, client: &reqwest::Client) -> Result<(), String> {
-        client.post("https://discord.com/api/webhooks/806695239292420136/VluZsUKgNLRphkmeBjO8iHwhRybn6FChfBspaImn5FsmAvqC5IvcS1NVnDQt8YDLKV57").json(&self).send().await.map_err(|_| "error sending webhook".to_string())?;
+    async fn send(self, client: &reqwest::Client, webhooks: &Vec<String>) -> Result<(), String> {
+        for url in webhooks {
+            client.post(url).json(&self).send().await.map_err(|_| "error sending webhook".to_string())?;
+        }
         Ok(())
     }
 }
@@ -177,6 +179,9 @@ struct ComicCronState {
     xkcd: i32,
     qc: String,
     smbc: String,
+    xkcd_webhooks: Vec<String>,
+    qc_webhooks: Vec<String>,
+    smbc_webhooks: Vec<String>
 }
 
 impl ComicCronState {
@@ -202,7 +207,7 @@ async fn xkcd(client: &Client, state: &mut ComicCronState) -> Result<(), String>
     } else {
         return Ok(())
     }.into();
-    webhook.send(client).await?;
+    webhook.send(client, &state.xkcd_webhooks).await?;
     state.xkcd += 1;
     Ok(())
 }
@@ -225,13 +230,13 @@ async fn qc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
             for i in 1..rss_items.len() {
                 if rss_items[i].guid == state.qc {
                     let webhook = rss_items[i - 1].qc_webhook(false).ok_or("rust -> webhook".to_string())?;
-                    webhook.send(client).await?;
+                    webhook.send(client, &state.qc_webhooks).await?;
                     state.qc = rss_items[i - 1].guid.to_string();
                     return Ok(());
                 }
             }
             let webhook = rss_items[rss_items.len() - 1].qc_webhook(true).ok_or("rust -> webhook".to_string())?;
-            webhook.send(client).await?;
+            webhook.send(client, &state.qc_webhooks).await?;
             state.qc = rss_items[rss_items.len() - 1].guid.to_string();
             Ok(())
         }
@@ -256,13 +261,13 @@ async fn smbc(client: &Client, state: &mut ComicCronState) -> Result<(), String>
             for i in 1..rss_items.len() {
                 if rss_items[i].guid == state.smbc {
                     let webhook = rss_items[i - 1].smbc_webhook(false).ok_or("rust -> webhook".to_string())?;
-                    webhook.send(client).await?;
+                    webhook.send(client, &state.smbc_webhooks).await?;
                     state.smbc = rss_items[i - 1].guid.to_string();
                     return Ok(());
                 }
             }
             let webhook = rss_items[rss_items.len() - 1].smbc_webhook(true).ok_or("rust -> webhook".to_string())?;
-            webhook.send(client).await?;
+            webhook.send(client, &state.smbc_webhooks).await?;
             state.smbc = rss_items[rss_items.len() - 1].guid.to_string();
             Ok(())
         }

@@ -2,23 +2,13 @@ use std::fmt::Display;
 use std::str::FromStr;
 
 use chrono::TimeZone;
+use macky_xml::{Node, QuerySupport};
+use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde::de::Error;
-use scraper::ElementRef;
 
 fn from_str<'de, T: FromStr, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> where T::Err: Display {
     T::from_str(&String::deserialize(deserializer)?).map_err(D::Error::custom)
-}
-
-macro_rules! maperr {
-    ($value: expr, $err: literal) => {
-        match $value {
-            Ok(result) => result,
-            Err(e) => {
-                return Err(format!("{:?}: {:?}", e, $err))
-            }
-        }
-    };
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -53,8 +43,6 @@ struct Webhook {
     avatar_url: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     embeds: Vec<Embed>,
-    #[serde(skip)]
-    send_to: &'static str,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -76,33 +64,92 @@ struct Xkcd {
 }
 
 #[derive(Debug)]
-struct Qc {
+struct RssItem {
     title: String,
     link: String,
-    img: String,
-    date: String,
+    img_url: String,
+    alt_text: String,
+    pub_date: String,
+    guid: String,
+}
+
+impl RssItem {
+    fn qc_webhook(&self, potential_skip: bool) -> Option<Webhook> {
+        self.webhook(potential_skip, "QC", "https://www.questionablecontent.net/favicon/favicon-16x16.png")
+    }
+
+    fn smbc_webhook(&self, potential_skip: bool) -> Option<Webhook> {
+        self.webhook(potential_skip, "SMBC", "https://www.smbc-comics.com/favicon.ico")
+    }
+
+    fn webhook(&self, potential_skip: bool, embed_title: &'static str, footer: &'static str) -> Option<Webhook> {
+        Some(Webhook {
+            content: if potential_skip { "Some items may have been skipped" } else { "" }.to_string(),
+            username: format!("ComicCron {}", embed_title),
+            avatar_url: AVATAR_URL.to_string(),
+            embeds: vec![Embed {
+                title: format!("{}", self.title),
+                ty: "rich".to_string(),
+                description: "".to_string(),
+                url: Some(self.link.to_owned()),
+                timestamp: chrono::DateTime::parse_from_rfc2822(&self.pub_date).ok()?.format("%+").to_string(),
+                footer: Footer { text: self.alt_text.to_owned(), icon_url: Some(footer.to_string()) },
+                image: Image { url: self.img_url.to_owned() },
+            }],
+        })
+    }
+
+    fn parse_qc_desc(data: Vec<&Node>) -> Option<(&str, &str)> {
+        let img_url = data.elem_name("img").first()?.attributes.get("src")?;
+        Some((img_url, ""))
+    }
+
+    fn parse_smbc_desc(data: Vec<&Node>) -> Option<(&str, &str)> {
+        let img_url = data.elem_name("img").first()?.attributes.get("src")?;
+        Some((img_url, ""))
+    }
+
+    fn from_rss(item: &macky_xml::Element, description: impl Fn(Vec<&Node>) -> Option<(&str, &str)>) -> Option<RssItem> {
+        let title = item.children().elem_name("title").only()?.children().only()?.as_cdata()?;
+        let link = item.children().elem_name("link").only()?.children().only()?.as_cdata()?;
+        let description_text = item.children().elem_name("description").only()?.children().only()?.as_cdata()?;
+        let description_parser = macky_xml::Parser {
+            allow_no_close: vec!["img".to_string()]
+        };
+        let description_text = format!("<root>{}</root>", description_text);
+        let description_doc = description_parser.complete_element(&description_text)?;
+        let (img_url, alt_text) = description(description_doc.children())?;
+        let pub_date = item.children().elem_name("pubDate").only()?.children().only()?.as_cdata()?.to_owned();
+        let guid = item.children().elem_name("guid").only()?.children().only()?.as_cdata()?.to_owned();
+
+        Some(RssItem {
+            title: title.to_string(),
+            link: link.to_string(),
+            img_url: img_url.to_string(),
+            alt_text: alt_text.to_string(),
+            pub_date,
+            guid,
+        })
+    }
 }
 
 impl Webhook {
     async fn send(self, client: &reqwest::Client) -> Result<(), String> {
-        maperr!(client.post(self.send_to).json(&self).send().await, "reqwest error");
+        client.post("https://discord.com/api/webhooks/806695239292420136/VluZsUKgNLRphkmeBjO8iHwhRybn6FChfBspaImn5FsmAvqC5IvcS1NVnDQt8YDLKV57").json(&self).send().await.map_err(|_| "error sending webhook".to_string())?;
         Ok(())
     }
 }
 
 impl Xkcd {
     async fn get(client: &reqwest::Client, index: Option<i32>) -> Result<Xkcd, String> {
-        Ok(maperr!(
-            serde_json::from_value(maperr!(
-                serde_json::Value::from_str(&maperr!(maperr!(
-                    client.get(&match index {
-                        Some(index) => format!("https://xkcd.com/{}/info.0.json", index),
-                        None => "https://xkcd.com/info.0.json".to_string()
-                    }).send().await,
-                    "reqwest error").text().await, "reqwest error")),
-                "serde_json error")),
-            "serde_json error")
-        )
+        let url = match index {
+            Some(index) => format!("https://xkcd.com/{}/info.0.json", index),
+            None => "https://xkcd.com/info.0.json".to_string()
+        };
+        let response = client.get(&url).send().await.map_err(|_| format!("url -> request {:?}", index))?;
+        let text = response.text().await.map_err(|_| format!("request -> text: #{:?}", index))?;
+        let json = serde_json::Value::from_str(&text).map_err(|_| format!("text -> json {:?}", index))?;
+        serde_json::from_value(json).map_err(|_| format!("json -> rust {:?}", index))
     }
 }
 
@@ -121,34 +168,106 @@ impl Into<Webhook> for Xkcd {
                 footer: Footer { text: self.alt, icon_url: Some("https://cdn.discordapp.com/attachments/751998036841857099/804483113001812028/919f27-2.png".to_string()) },
                 image: Image { url: self.img },
             }],
-            send_to: XKCD,
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ComicCronState {
-    last_posted_xkcd: i32
+    xkcd: i32,
+    qc: String,
+    smbc: String,
 }
 
 impl ComicCronState {
-    async fn get() -> Result<ComicCronState, String> {
-        Ok(maperr!(
-            serde_json::from_value(maperr!(
-                serde_json::Value::from_str(&maperr!(std::fs::read_to_string("comic_cron.json"), "std::fs error")),
-            "serde_json error")),
-        "serde_json error"))
+    fn get() -> Result<ComicCronState, String> {
+        let text = std::fs::read_to_string("comic_cron.json").map_err(|_| "filesystem -> text".to_string())?;
+        let json = serde_json::Value::from_str(&text).map_err(|_| "text -> json".to_string())?;
+        serde_json::from_value(json).map_err(|_| "json -> rust".to_string())
     }
     fn set(self) -> Result<(), String> {
-        maperr!(std::fs::write("comic_cron.json", maperr!(serde_json::to_string(&self), "serde_json error")), "std::fs error");
-        Ok(())
+        let text = serde_json::to_string_pretty(&self).map_err(|_| "rust -> text".to_string())?;
+        std::fs::write("comic_cron.json", text).map_err(|_| "text -> filesystem".to_string())
     }
 }
 
-const XKCD: &'static str = "https://discord.com/api/webhooks/804475443620216872/KkSwxUkd5_7HQusYFWXrJRUS3n5YcBBNjDvIZenaKLH2WIk4YwGV0Q5-sV1d_Ix_JsTa";
 const AVATAR_URL: &'static str = "https://cdn.discordapp.com/attachments/751998036841857099/804504521215705118/zoey_pink_twitter.jpg";
-// const SMBC: &'static str = "https://discord.com/api/webhooks/804475468886573056/56f6C3rIKIZa28TmXwKkt4ivOQg1rzePD2ZME4j3ZppLzQGLe15SFb2bDOo5sW6jHHlo";
-// const QC: &'static str = "https://discord.com/api/webhooks/804475489720860712/akQZ8PXXCvf0Av9774LY6fp5Itlnquo7GsiPfT49P7DG8RJ8JW2lyefjpc_5fgBwfmEB";
+
+async fn xkcd(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+    let latest_xkcd = Xkcd::get(client, None).await?;
+    let webhook: Webhook = if state.xkcd + 1 == latest_xkcd.num {
+        latest_xkcd
+    } else if state.xkcd + 1 < latest_xkcd.num {
+        Xkcd::get(client, Some(state.xkcd + 1)).await?
+    } else {
+        return Ok(())
+    }.into();
+    webhook.send(client).await?;
+    state.xkcd += 1;
+    Ok(())
+}
+
+async fn qc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+    let response = client.get("https://www.questionablecontent.net/QCRSS.xml").send().await.map_err(|_| "url -> request".to_string())?;
+    let text = response.text().await.map_err(|_| "request -> text".to_string())?;
+    let document = macky_xml::Parser::default().complete_document(&text).ok_or("text -> xml".to_string())?;
+    let xml_items = document.root.children().elem_name("item");
+    if xml_items.len() == 0 {
+        Err("no rss items".to_string())
+    } else {
+        let mut rss_items = vec![];
+        for xml in xml_items {
+            rss_items.push(RssItem::from_rss(xml, RssItem::parse_qc_desc).ok_or("xml -> rust")?);
+        }
+        if rss_items[0].guid == state.qc {
+            Ok(())
+        } else {
+            for i in 1..rss_items.len() {
+                if rss_items[i].guid == state.qc {
+                    let webhook = rss_items[i - 1].qc_webhook(false).ok_or("rust -> webhook".to_string())?;
+                    webhook.send(client).await?;
+                    state.qc = rss_items[i - 1].guid.to_string();
+                    return Ok(());
+                }
+            }
+            let webhook = rss_items[rss_items.len() - 1].qc_webhook(true).ok_or("rust -> webhook".to_string())?;
+            webhook.send(client).await?;
+            state.qc = rss_items[rss_items.len() - 1].guid.to_string();
+            Ok(())
+        }
+    }
+}
+
+async fn smbc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+    let response = client.get("https://www.smbc-comics.com/comic/rss").send().await.map_err(|_| "url -> request".to_string())?;
+    let text = response.text().await.map_err(|_| "request -> text".to_string())?;
+    let document = macky_xml::Parser::default().complete_document(&text).ok_or("text -> xml".to_string())?;
+    let xml_items = document.root.children().elem_name("item");
+    if xml_items.len() == 0 {
+        Err("no rss items".to_string())
+    } else {
+        let mut rss_items = vec![];
+        for xml in xml_items {
+            rss_items.push(RssItem::from_rss(xml, RssItem::parse_smbc_desc).ok_or("xml -> rust")?);
+        }
+        if rss_items[0].guid == state.smbc {
+            Ok(())
+        } else {
+            for i in 1..rss_items.len() {
+                if rss_items[i].guid == state.smbc {
+                    let webhook = rss_items[i - 1].smbc_webhook(false).ok_or("rust -> webhook".to_string())?;
+                    webhook.send(client).await?;
+                    state.smbc = rss_items[i - 1].guid.to_string();
+                    return Ok(());
+                }
+            }
+            let webhook = rss_items[rss_items.len() - 1].smbc_webhook(true).ok_or("rust -> webhook".to_string())?;
+            webhook.send(client).await?;
+            state.smbc = rss_items[rss_items.len() - 1].guid.to_string();
+            Ok(())
+        }
+    }
+}
 
 fn main() {
     let x: Result<(), String> = tokio::runtime::Builder::new_current_thread()
@@ -157,37 +276,13 @@ fn main() {
         .unwrap()
         .block_on(async {
             let client = reqwest::Client::new();
-            let res = maperr!(maperr!(client.get("https://www.questionablecontent.net/QCRSS.xml").send().await, "reqwest error").text().await, "reqwest error");
-            let doc = scraper::Html::parse_document(&res);
-            let sel = scraper::Selector::parse("item:first-child").unwrap();
-            let res = doc.select(&sel).next().unwrap();
-            fn visit(x: ElementRef) {
-                println!("[{:?}]", x.html());
-                for y in x.children() {
-                    let node = y.value();
-                    if let Some(e) = node.as_element() {
-                        visit(ElementRef::wrap(y).unwrap());
-                    }
-                }
-            }
-            visit(res);
 
-            // let pkg = maperr!(sxd_document::parser::parse(&res), "sxd_document error");
-            // let doc = pkg.as_document();
-            // let title = sxd_xpath::evaluate_xpath(&doc, "/rss/channel/item[1]/title").unwrap().string();
-            // let link = sxd_xpath::evaluate_xpath(&doc, "/rss/channel/item[1]/link").unwrap().string();
-            // let description_text = sxd_xpath::evaluate_xpath(&doc, "/rss/channel/item[1]/description").unwrap().string();
-            // let date = sxd_xpath::evaluate_xpath(&doc, "/rss/channel/item[1]/pubDate").unwrap().string();
-            // println!("{}\n{}\n[{}]\n{}\n", title, link, description_text, date);
-            // let desc_pkg = maperr!(sxd_document::parser::parse(&format!("<root>{}</root>", description_text)), "sxd_document error");
-            // let desc_doc = desc_pkg.as_document();
-            // let img_url = sxd_xpath::evaluate_xpath(&desc_doc, "img");
-            // println!("{:?}", img_url);
+            let mut state = ComicCronState::get()?;
+            println!("xkcd {:?}", xkcd(&client, &mut state).await);
+            println!("QC   {:?}", qc(&client, &mut state).await);
+            println!("SMBC {:?}", smbc(&client, &mut state).await);
+            state.set()?;
 
-            // let state = ComicCronState::get().await?;
-            // let webhook: Webhook = Xkcd::get(&client, Some(state.last_posted_xkcd)).await?.into();
-            // webhook.send(&client).await?;
-            // state.set()?;
             Ok(())
         });
     match x {

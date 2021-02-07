@@ -11,6 +11,13 @@ fn from_str<'de, T: FromStr, D: Deserializer<'de>>(deserializer: D) -> Result<T,
     T::from_str(&String::deserialize(deserializer)?).map_err(D::Error::custom)
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Field {
+    name: String,
+    value: String,
+    inline: bool,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 struct Footer {
     text: String,
@@ -32,8 +39,9 @@ struct Embed {
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     timestamp: String,
-    footer: Footer,
-    image: Image,
+    fields: Vec<Field>,
+    footer: Option<Footer>,
+    image: Option<Image>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -93,8 +101,9 @@ impl RssItem {
                 description: "".to_string(),
                 url: Some(self.link.to_owned()),
                 timestamp: chrono::DateTime::parse_from_rfc2822(&self.pub_date).ok()?.format("%+").to_string(),
-                footer: Footer { text: self.alt_text.to_owned(), icon_url: Some(footer.to_string()) },
-                image: Image { url: self.img_url.to_owned() },
+                fields: vec![],
+                footer: Some(Footer { text: self.alt_text.to_owned(), icon_url: Some(footer.to_string()) }),
+                image: Some(Image { url: self.img_url.to_owned() }),
             }],
         })
     }
@@ -140,6 +149,23 @@ impl Webhook {
         }
         Ok(())
     }
+    fn debug(fields: Vec<Field>) -> Webhook {
+        Webhook {
+            content: "".to_string(),
+            username: "ComicCron Debug".to_string(),
+            avatar_url: AVATAR_URL.to_string(),
+            embeds: vec![Embed {
+                title: "".to_string(),
+                ty: "rich".to_string(),
+                description: "".to_string(),
+                url: None,
+                timestamp: "".to_string(),
+                fields,
+                footer: None,
+                image: None,
+            }],
+        }
+    }
 }
 
 impl Xkcd {
@@ -167,8 +193,9 @@ impl Into<Webhook> for Xkcd {
                 description: "".to_string(),
                 url: Some(self.link),
                 timestamp: format!("{}", chrono::Utc.ymd(self.year, self.month, self.day).and_hms(0, 0, 0).format("%+")),
-                footer: Footer { text: self.alt, icon_url: Some("https://cdn.discordapp.com/attachments/751998036841857099/804483113001812028/919f27-2.png".to_string()) },
-                image: Image { url: self.img },
+                fields: vec![],
+                footer: Some(Footer { text: self.alt, icon_url: Some("https://cdn.discordapp.com/attachments/751998036841857099/804483113001812028/919f27-2.png".to_string()) }),
+                image: Some(Image { url: self.img }),
             }],
         }
     }
@@ -181,7 +208,8 @@ struct ComicCronState {
     smbc: String,
     xkcd_webhooks: Vec<String>,
     qc_webhooks: Vec<String>,
-    smbc_webhooks: Vec<String>
+    smbc_webhooks: Vec<String>,
+    debug_webhooks: Vec<String>,
 }
 
 impl ComicCronState {
@@ -198,21 +226,25 @@ impl ComicCronState {
 
 const AVATAR_URL: &'static str = "https://cdn.discordapp.com/attachments/751998036841857099/804504521215705118/zoey_pink_twitter.jpg";
 
-async fn xkcd(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+type Success = Option<String>;
+
+async fn xkcd(client: &Client, state: &mut ComicCronState) -> Result<Success, String> {
     let latest_xkcd = Xkcd::get(client, None).await?;
-    let webhook: Webhook = if state.xkcd + 1 == latest_xkcd.num {
+    let post = if state.xkcd + 1 == latest_xkcd.num {
         latest_xkcd
     } else if state.xkcd + 1 < latest_xkcd.num {
         Xkcd::get(client, Some(state.xkcd + 1)).await?
     } else {
-        return Ok(())
-    }.into();
+        return Ok(None);
+    };
+    let num = post.num.to_string();
+    let webhook: Webhook = post.into();
     webhook.send(client, &state.xkcd_webhooks).await?;
     state.xkcd += 1;
-    Ok(())
+    Ok(Some(num))
 }
 
-async fn qc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+async fn qc(client: &Client, state: &mut ComicCronState) -> Result<Success, String> {
     let response = client.get("https://www.questionablecontent.net/QCRSS.xml").send().await.map_err(|_| "url -> request".to_string())?;
     let text = response.text().await.map_err(|_| "request -> text".to_string())?;
     let document = macky_xml::Parser::default().complete_document(&text).ok_or("text -> xml".to_string())?;
@@ -225,25 +257,25 @@ async fn qc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
             rss_items.push(RssItem::from_rss(xml, RssItem::parse_qc_desc).ok_or("xml -> rust")?);
         }
         if rss_items[0].guid == state.qc {
-            Ok(())
+            Ok(None)
         } else {
             for i in 1..rss_items.len() {
                 if rss_items[i].guid == state.qc {
                     let webhook = rss_items[i - 1].qc_webhook(false).ok_or("rust -> webhook".to_string())?;
                     webhook.send(client, &state.qc_webhooks).await?;
                     state.qc = rss_items[i - 1].guid.to_string();
-                    return Ok(());
+                    return Ok(Some(rss_items[i - 1].title.to_string()));
                 }
             }
             let webhook = rss_items[rss_items.len() - 1].qc_webhook(true).ok_or("rust -> webhook".to_string())?;
             webhook.send(client, &state.qc_webhooks).await?;
             state.qc = rss_items[rss_items.len() - 1].guid.to_string();
-            Ok(())
+            Ok(Some(rss_items[rss_items.len() - 1].title.to_string()))
         }
     }
 }
 
-async fn smbc(client: &Client, state: &mut ComicCronState) -> Result<(), String> {
+async fn smbc(client: &Client, state: &mut ComicCronState) -> Result<Success, String> {
     let response = client.get("https://www.smbc-comics.com/comic/rss").send().await.map_err(|_| "url -> request".to_string())?;
     let text = response.text().await.map_err(|_| "request -> text".to_string())?;
     let document = macky_xml::Parser::default().complete_document(&text).ok_or("text -> xml".to_string())?;
@@ -256,42 +288,71 @@ async fn smbc(client: &Client, state: &mut ComicCronState) -> Result<(), String>
             rss_items.push(RssItem::from_rss(xml, RssItem::parse_smbc_desc).ok_or("xml -> rust")?);
         }
         if rss_items[0].guid == state.smbc {
-            Ok(())
+            Ok(None)
         } else {
             for i in 1..rss_items.len() {
                 if rss_items[i].guid == state.smbc {
                     let webhook = rss_items[i - 1].smbc_webhook(false).ok_or("rust -> webhook".to_string())?;
                     webhook.send(client, &state.smbc_webhooks).await?;
                     state.smbc = rss_items[i - 1].guid.to_string();
-                    return Ok(());
+                    return Ok(Some(rss_items[i - 1].title.to_string()));
                 }
             }
             let webhook = rss_items[rss_items.len() - 1].smbc_webhook(true).ok_or("rust -> webhook".to_string())?;
             webhook.send(client, &state.smbc_webhooks).await?;
             state.smbc = rss_items[rss_items.len() - 1].guid.to_string();
-            Ok(())
+            Ok(Some(rss_items[rss_items.len() - 1].title.to_string()))
         }
     }
 }
 
 fn main() {
-    let x: Result<(), String> = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
             let client = reqwest::Client::new();
 
-            let mut state = ComicCronState::get()?;
-            println!("xkcd {:?}", xkcd(&client, &mut state).await);
-            println!("QC   {:?}", qc(&client, &mut state).await);
-            println!("SMBC {:?}", smbc(&client, &mut state).await);
-            state.set()?;
-
-            Ok(())
+            let mut fields = vec![];
+            match ComicCronState::get() {
+                Ok(mut state) => {
+                    let xkcd = format!("{:?}", xkcd(&client, &mut state).await);
+                    let qc = format!("{:?}", qc(&client, &mut state).await);
+                    let smbc = format!("{:?}", smbc(&client, &mut state).await);
+                    let debug_webhooks = state.debug_webhooks.to_owned();
+                    let save = format!("{:?}", state.set());
+                    fields.push(Field {
+                        name: "xkcd".to_string(),
+                        value: format!("`{}`", xkcd),
+                        inline: false,
+                    });
+                    fields.push(Field {
+                        name: "QC".to_string(),
+                        value: format!("`{}`", qc),
+                        inline: false,
+                    });
+                    fields.push(Field {
+                        name: "SMBC".to_string(),
+                        value: format!("`{}`", smbc),
+                        inline: false,
+                    });
+                    fields.push(Field {
+                        name: "Save".to_string(),
+                        value: format!("`{}`", save),
+                        inline: false,
+                    });
+                    if let Err(err) = Webhook::debug(fields).send(&client, &debug_webhooks).await {
+                        println!("xkcd: {:?}", xkcd);
+                        println!("qc  : {:?}", qc);
+                        println!("smbc: {:?}", smbc);
+                        println!("save: {:?}", save);
+                        println!("Error sending debug webhook:\n{}", err);
+                    }
+                }
+                Err(err) => {
+                    println!("Error loading state:\n{}", err);
+                }
+            }
         });
-    match x {
-        Ok(_) => println!("Success!"),
-        Err(err) => println!("Error: {}", err)
-    }
 }

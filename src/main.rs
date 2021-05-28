@@ -123,7 +123,7 @@ impl RssItem {
         let link = item.children().elem_name("link").only()?.children().only()?.as_cdata()?;
         let description_text = item.children().elem_name("description").only()?.children().only()?.as_cdata()?;
         let description_parser = macky_xml::Parser {
-            allow_no_close: vec!["img".to_string()]
+            allow_no_close: vec!["img".to_string(), "!doctype".to_string()]
         };
         let description_text = format!("<root>{}</root>", description_text);
         let description_doc = description_parser.complete_element(&description_text)?;
@@ -218,7 +218,7 @@ impl ComicCronState {
         let json = serde_json::Value::from_str(&text).map_err(|_| "text -> json".to_string())?;
         serde_json::from_value(json).map_err(|_| "json -> rust".to_string())
     }
-    fn set(self) -> Result<(), String> {
+    fn set(&self) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&self).map_err(|_| "rust -> text".to_string())?;
         std::fs::write("comic_cron.json", text).map_err(|_| "text -> filesystem".to_string())
     }
@@ -312,37 +312,36 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let client = reqwest::Client::new();
-
-            let mut fields = vec![];
             match ComicCronState::get() {
                 Ok(mut state) => {
+                    let client = reqwest::Client::new();
                     let xkcd = format!("{:?}", xkcd(&client, &mut state).await);
                     let qc = format!("{:?}", qc(&client, &mut state).await);
                     let smbc = format!("{:?}", smbc(&client, &mut state).await);
-                    let debug_webhooks = state.debug_webhooks.to_owned();
                     let save = format!("{:?}", state.set());
-                    fields.push(Field {
-                        name: "xkcd".to_string(),
-                        value: format!("`{}`", xkcd),
-                        inline: false,
-                    });
-                    fields.push(Field {
-                        name: "QC".to_string(),
-                        value: format!("`{}`", qc),
-                        inline: false,
-                    });
-                    fields.push(Field {
-                        name: "SMBC".to_string(),
-                        value: format!("`{}`", smbc),
-                        inline: false,
-                    });
-                    fields.push(Field {
-                        name: "Save".to_string(),
-                        value: format!("`{}`", save),
-                        inline: false,
-                    });
-                    if let Err(err) = Webhook::debug(fields).send(&client, &debug_webhooks).await {
+
+                   if let Err(err) = Webhook::debug(vec![
+                        Field {
+                            name: "xkcd".to_string(),
+                            value: format!("`{}`", xkcd),
+                            inline: false,
+                        },
+                        Field {
+                            name: "QC".to_string(),
+                            value: format!("`{}`", qc),
+                            inline: false,
+                        },
+                        Field {
+                            name: "SMBC".to_string(),
+                            value: format!("`{}`", smbc),
+                            inline: false,
+                        },
+                        Field {
+                            name: "Save".to_string(),
+                            value: format!("`{}`", save),
+                            inline: false,
+                        }
+                    ]).send(&client, &state.debug_webhooks).await {
                         println!("xkcd: {:?}", xkcd);
                         println!("qc  : {:?}", qc);
                         println!("smbc: {:?}", smbc);

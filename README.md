@@ -1,3 +1,3 @@
 # ComicCron
 
-i couldnt think of a worse name for a discord autoposter for xkcd, QC, and SMBC
+Discord autoposter for three of my favorite webcomics, using a custom-written XML library (https://github.com/jearmstrong21/macky_xml) to parse badly formatted RSS feeds.
